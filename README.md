@@ -54,6 +54,7 @@ The portal follows the LFZ brand guide: LFZ Navy and Scarlet, Ubuntu, and the ma
 | `artifact/solution-delivery-queue.html` | The page as published on Claude. This is the source for the UI. |
 | `tools/build_app.py` | Rebuilds `index.html` from the artifact page. |
 | `documentation/` | The process document for new users (Word). |
+| `openapi.yaml` | API contract for building this as a module of the LFZ .NET portal (OpenAPI 3.0). |
 
 ## Two ways to run it
 

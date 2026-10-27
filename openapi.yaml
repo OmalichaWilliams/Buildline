@@ -1,0 +1,697 @@
+openapi: 3.0.3
+info:
+  title: Solution Delivery Queue API
+  version: 1.0.0
+  description: |
+    API for the Solution Delivery Queue module of the LFZ portal.
+    Behaviour matches the prototype in this repository (artifact/solution-delivery-queue.html).
+
+    Roles: ItAdmin, ProcessOwner, Viewer. Every write is checked on the server; a role that
+    may not perform an action gets 403. Workflow actions are allowed only from the stages listed
+    in the build specification; any other stage returns 409 with the current stage.
+
+    Workflow actions send If-Match with the solution's ETag (RowVersion). A stale ETag returns 412.
+servers:
+  - url: /api/sdq
+security:
+  - portalAuth: []
+
+tags:
+  - name: Reading
+  - name: Workflow
+  - name: Bugs
+  - name: Resources
+  - name: Users
+
+# Shared responses for every workflow action (YAML anchor, reused below).
+x-workflow-responses: &workflowResponses
+  '200': { $ref: '#/components/responses/Solution' }
+  '400': { $ref: '#/components/responses/Problem' }
+  '403': { $ref: '#/components/responses/Problem' }
+  '404': { $ref: '#/components/responses/Problem' }
+  '409': { $ref: '#/components/responses/Problem' }
+  '412': { $ref: '#/components/responses/Problem' }
+
+paths:
+  /me:
+    get:
+      tags: [Reading]
+      summary: Current user and role
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } } }
+
+  /summary:
+    get:
+      tags: [Reading]
+      summary: The six Pipeline counts
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      parameters: [ { $ref: '#/components/parameters/Department' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Summary' } } } }
+
+  /queue:
+    get:
+      tags: [Reading]
+      summary: Queued requests in queue order, with computed position
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      parameters: [ { $ref: '#/components/parameters/Department' } ]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } } } }
+
+  /solutions:
+    get:
+      tags: [Reading]
+      summary: Requests by lane
+      description: intake = Submitted and ScopeReview, oldest first; queue = same as /queue; closed = Completed and Declined, newest first.
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      parameters:
+        - { name: lane, in: query, required: true, schema: { type: string, enum: [intake, queue, closed] } }
+        - $ref: '#/components/parameters/Department'
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } } } }
+    post:
+      tags: [Workflow]
+      summary: Submit a prototype
+      description: Creates a request in stage Submitted with no queue position.
+      x-roles: [ProcessOwner, ItAdmin]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SubmitRequest' } } }
+      responses:
+        '201': { $ref: '#/components/responses/Solution' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+
+  /solutions/{id}:
+    get:
+      tags: [Reading]
+      summary: Full request detail with plan, history and bugs
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200': { $ref: '#/components/responses/Solution' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /solutions/{id}/start-scope-review:
+    post:
+      tags: [Workflow]
+      summary: Submitted → ScopeReview
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      responses: *workflowResponses
+
+  /solutions/{id}/accept:
+    post:
+      tags: [Workflow]
+      summary: ScopeReview → AwaitingAllocation; locks scope and sets QueueSequence = now
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AcceptRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/decline:
+    post:
+      tags: [Workflow]
+      summary: ScopeReview → Declined
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReasonRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/plan:
+    put:
+      tags: [Workflow]
+      summary: Set time and resources; AwaitingAllocation → UiUx
+      description: Requires all five phases. Planned start and end dates are computed in working days (Monday to Friday).
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/PlanRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/design-complete:
+    post:
+      tags: [Workflow]
+      summary: UiUx → UserVerification
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      responses: *workflowResponses
+
+  /solutions/{id}/design-verification:
+    post:
+      tags: [Workflow]
+      summary: UserVerification → Development (accepted) or DesignDispute (rejected)
+      x-roles: [ProcessOwner, ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/VerdictRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/determine-cause:
+    post:
+      tags: [Workflow]
+      summary: Resolve a DesignDispute or UatDispute
+      description: |
+        cause = IT: DesignDispute → UiUx or UatDispute → Development; ItReworkCount + 1; plan unchanged.
+        cause = ProcessOwner: → ReturnedToOwner; OwnerReturnCount + 1; QueueSequence = now; plan cleared.
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CauseRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/development-complete:
+    post:
+      tags: [Workflow]
+      summary: Development → Qa
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      responses: *workflowResponses
+
+  /solutions/{id}/qa-result:
+    post:
+      tags: [Workflow]
+      summary: Qa → UatInvited (passed, sets UatInvitedAt) or Development (failed, ItReworkCount + 1)
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/QaResultRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/uat/confirm:
+    post:
+      tags: [Workflow]
+      summary: UatInvited → Uat
+      x-roles: [ProcessOwner, ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/UatConfirmRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/uat/apply-lapse-rule:
+    post:
+      tags: [Workflow]
+      summary: Apply the 5-working-day rule
+      description: Allowed only in UatInvited when 5 or more working days have passed since UatInvitedAt. Sets QueueSequence = now, DeprioritisedCount + 1, UatInvitedAt = null.
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      responses: *workflowResponses
+
+  /solutions/{id}/uat/reinvite:
+    post:
+      tags: [Workflow]
+      summary: Send the UAT invitation again (UatInvited with UatInvitedAt null)
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      responses: *workflowResponses
+
+  /solutions/{id}/uat-result:
+    post:
+      tags: [Workflow]
+      summary: Uat → Deployment (accepted) or UatDispute (rejected)
+      x-roles: [ProcessOwner, ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/VerdictRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/deployed:
+    post:
+      tags: [Workflow]
+      summary: Deployment → PostDeployment; sets DeployedAt
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      responses: *workflowResponses
+
+  /solutions/{id}/variation:
+    post:
+      tags: [Workflow]
+      summary: Major variation from the process owner; PostDeployment → ReturnedToOwner, QueueSequence = now
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NoteRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/close:
+    post:
+      tags: [Workflow]
+      summary: PostDeployment → Completed
+      description: Allowed with open bugs; the response includes openBugCount so the UI can warn first.
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        content: { application/json: { schema: { $ref: '#/components/schemas/OptionalNoteRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/resubmit:
+    post:
+      tags: [Workflow]
+      summary: ReturnedToOwner → AwaitingAllocation; keeps its (bottom) QueueSequence
+      x-roles: [ProcessOwner, ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IfMatch' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ResubmitRequest' } } }
+      responses: *workflowResponses
+
+  /solutions/{id}/bugs:
+    post:
+      tags: [Bugs]
+      summary: Log a bug (solution must be in PostDeployment)
+      x-roles: [ProcessOwner, ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BugRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Bug' } } } }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /bugs:
+    get:
+      tags: [Bugs]
+      summary: Bug queue
+      description: open = oldest first with position; fixed = newest first, last 20.
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      parameters:
+        - { name: status, in: query, required: true, schema: { type: string, enum: [open, fixed] } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Bug' } } } } }
+
+  /bugs/{id}/fix:
+    post:
+      tags: [Bugs]
+      summary: Mark a bug fixed
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bug' } } } }
+
+  /admin/worklist:
+    get:
+      tags: [Reading]
+      summary: Grouped lists for the IT admin screen
+      x-roles: [ItAdmin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Worklist' } } } }
+
+  /resources:
+    get:
+      tags: [Resources]
+      summary: Active IT resources
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Resource' } } } } }
+    post:
+      tags: [Resources]
+      summary: Add an IT resource
+      x-roles: [ItAdmin]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ResourceRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Resource' } } } }
+
+  /resources/{id}:
+    delete:
+      tags: [Resources]
+      summary: Remove an IT resource (soft delete)
+      x-roles: [ItAdmin]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '204': { description: Removed }
+
+  /resources/load:
+    get:
+      tags: [Resources]
+      summary: Current and upcoming phases per resource, plus idle resources
+      x-roles: [ItAdmin]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ResourceLoad' } } } } }
+
+  /users:
+    get:
+      tags: [Users]
+      summary: Users and their roles
+      x-roles: [ItAdmin]
+      parameters:
+        - { name: role, in: query, schema: { $ref: '#/components/schemas/Role' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/UserRole' } } } } }
+
+  /users/{id}/role:
+    put:
+      tags: [Users]
+      summary: Change a user's role
+      x-roles: [ItAdmin]
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [role], properties: { role: { $ref: '#/components/schemas/Role' } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UserRole' } } } }
+
+  /meta:
+    get:
+      tags: [Reading]
+      summary: Stages, phases with default days, skills, departments in use
+      x-roles: [ItAdmin, ProcessOwner, Viewer]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Meta' } } } }
+
+components:
+  securitySchemes:
+    portalAuth:
+      type: http
+      scheme: bearer
+      description: The LFZ portal's existing authentication. Roles come from the identity store (SdqItAdmin, SdqProcessOwner, SdqViewer).
+
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    Department: { name: department, in: query, required: false, schema: { type: string } }
+    IfMatch: { name: If-Match, in: header, required: true, schema: { type: string }, description: ETag from the last read of the solution }
+
+  responses:
+    Solution:
+      description: The solution after the change
+      headers: { ETag: { schema: { type: string } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/SolutionDetail' } } }
+    Problem:
+      description: RFC 7807 problem details
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+
+  schemas:
+    Role: { type: string, enum: [ItAdmin, ProcessOwner, Viewer] }
+    Stage:
+      type: string
+      enum: [Submitted, ScopeReview, AwaitingAllocation, UiUx, UserVerification, DesignDispute, Development, Qa, UatInvited, Uat, UatDispute, Deployment, PostDeployment, ReturnedToOwner, Completed, Declined]
+    Phase: { type: string, enum: [UiUx, Development, Qa, Uat, Deployment] }
+    Fault: { type: string, enum: [IT, ProcessOwner], nullable: true }
+
+    Me:
+      type: object
+      properties:
+        userId: { type: string }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+
+    Summary:
+      type: object
+      properties:
+        awaitingReview: { type: integer }
+        inQueue: { type: integer }
+        beingBuilt: { type: integer }
+        waitingOnProcessOwner: { type: integer }
+        behindPlan: { type: integer }
+        openBugs: { type: integer }
+
+    SolutionListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string, example: SOL-004 }
+        title: { type: string }
+        department: { type: string }
+        processOwnerName: { type: string }
+        stage: { $ref: '#/components/schemas/Stage' }
+        waitingOn: { type: string, example: Process owner }
+        queuePosition: { type: integer, nullable: true }
+        stageSince: { type: string, format: date-time }
+        daysInStage: { type: integer }
+        currentPhaseDue: { type: string, format: date, nullable: true }
+        lateWorkingDays: { type: integer }
+        uatLapsed: { type: boolean }
+        uatWorkingDaysLeft: { type: integer, nullable: true }
+        plannedGoLive: { type: string, format: date, nullable: true }
+        itReworkCount: { type: integer }
+        ownerReturnCount: { type: integer }
+        deprioritisedCount: { type: integer }
+        submittedAt: { type: string, format: date-time }
+
+    SolutionDetail:
+      allOf:
+        - $ref: '#/components/schemas/SolutionListItem'
+        - type: object
+          properties:
+            approvedBy: { type: string }
+            description: { type: string }
+            prototypeLocation: { type: string }
+            submissionNotes: { type: string, nullable: true }
+            brdLocation: { type: string, nullable: true }
+            scopeSummary: { type: string, nullable: true }
+            scopeLockedAt: { type: string, format: date-time, nullable: true }
+            uatInvitedAt: { type: string, format: date-time, nullable: true }
+            uatSessionDate: { type: string, format: date, nullable: true }
+            uatAcceptedAt: { type: string, format: date-time, nullable: true }
+            deployedAt: { type: string, format: date-time, nullable: true }
+            completedAt: { type: string, format: date-time, nullable: true }
+            declineReason: { type: string, nullable: true }
+            disputeNote: { type: string, nullable: true }
+            returnedFrom: { allOf: [ { $ref: '#/components/schemas/Stage' } ], nullable: true }
+            openBugCount: { type: integer }
+            plan: { allOf: [ { $ref: '#/components/schemas/Plan' } ], nullable: true }
+            history: { type: array, items: { $ref: '#/components/schemas/HistoryEvent' } }
+            bugs: { type: array, items: { $ref: '#/components/schemas/Bug' } }
+            etag: { type: string }
+
+    Plan:
+      type: object
+      properties:
+        startDate: { type: string, format: date }
+        agreedAt: { type: string, format: date-time }
+        agreedByUserId: { type: string }
+        plannedGoLive: { type: string, format: date }
+        phases:
+          type: array
+          items:
+            type: object
+            properties:
+              phase: { $ref: '#/components/schemas/Phase' }
+              sequence: { type: integer, minimum: 1, maximum: 5 }
+              workingDays: { type: integer, minimum: 1 }
+              resourceId: { type: string, format: uuid, nullable: true }
+              resourceName: { type: string }
+              plannedStart: { type: string, format: date }
+              plannedEnd: { type: string, format: date }
+              isCurrent: { type: boolean }
+              lateWorkingDays: { type: integer }
+
+    HistoryEvent:
+      type: object
+      properties:
+        at: { type: string, format: date-time }
+        byUserId: { type: string }
+        byName: { type: string }
+        action: { type: string }
+        fromStage: { allOf: [ { $ref: '#/components/schemas/Stage' } ], nullable: true }
+        toStage: { allOf: [ { $ref: '#/components/schemas/Stage' } ], nullable: true }
+        fault: { $ref: '#/components/schemas/Fault' }
+        note: { type: string }
+
+    Bug:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        solutionId: { type: string, format: uuid }
+        solutionReference: { type: string }
+        solutionTitle: { type: string }
+        title: { type: string }
+        detail: { type: string }
+        reporterName: { type: string }
+        reportedAt: { type: string, format: date-time }
+        status: { type: string, enum: [Open, Fixed] }
+        position: { type: integer, nullable: true, description: Position in the open bug queue }
+        fixedAt: { type: string, format: date-time, nullable: true }
+
+    Resource:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        skill: { type: string, enum: ['UI/UX designer', 'Developer', 'QA', 'DevOps / deployment', 'Business analyst', 'Project manager'] }
+        addedAt: { type: string, format: date-time }
+
+    ResourceLoad:
+      type: object
+      properties:
+        resourceName: { type: string }
+        skill: { type: string, nullable: true }
+        available: { type: boolean }
+        assignments:
+          type: array
+          items:
+            type: object
+            properties:
+              solutionId: { type: string, format: uuid }
+              reference: { type: string }
+              title: { type: string }
+              phase: { $ref: '#/components/schemas/Phase' }
+              plannedStart: { type: string, format: date }
+              plannedEnd: { type: string, format: date }
+              isCurrent: { type: boolean }
+
+    Worklist:
+      type: object
+      properties:
+        disputes: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } }
+        uatLapsed: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } }
+        scopeReview: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } }
+        awaitingAllocation: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } }
+        inBuild: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } }
+        waitingOnProcessOwner: { type: array, items: { $ref: '#/components/schemas/SolutionListItem' } }
+        totals:
+          type: object
+          properties:
+            itRework: { type: integer }
+            ownerReturnsAndDeprioritised: { type: integer }
+
+    UserRole:
+      type: object
+      properties:
+        userId: { type: string }
+        name: { type: string }
+        email: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+
+    Meta:
+      type: object
+      properties:
+        stages: { type: array, items: { $ref: '#/components/schemas/Stage' } }
+        phases:
+          type: array
+          items:
+            type: object
+            properties:
+              phase: { $ref: '#/components/schemas/Phase' }
+              label: { type: string }
+              defaultWorkingDays: { type: integer }
+              defaultResourceName: { type: string }
+        skills: { type: array, items: { type: string } }
+        departments: { type: array, items: { type: string } }
+        uatResponseWorkingDays: { type: integer, example: 5 }
+
+    SubmitRequest:
+      type: object
+      required: [title, department, processOwnerName, approvedBy, description, prototypeLocation]
+      properties:
+        title: { type: string, maxLength: 200 }
+        department: { type: string, maxLength: 100 }
+        processOwnerName: { type: string, maxLength: 150 }
+        approvedBy: { type: string, maxLength: 150 }
+        description: { type: string }
+        prototypeLocation: { type: string, maxLength: 1000 }
+        notes: { type: string }
+
+    AcceptRequest:
+      type: object
+      required: [brdLocation, prototypeLocation, scopeSummary]
+      properties:
+        brdLocation: { type: string, maxLength: 1000 }
+        prototypeLocation: { type: string, maxLength: 1000 }
+        scopeSummary: { type: string }
+
+    PlanRequest:
+      type: object
+      required: [startDate, phases]
+      properties:
+        startDate: { type: string, format: date }
+        phases:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items:
+            type: object
+            required: [phase, workingDays]
+            properties:
+              phase: { $ref: '#/components/schemas/Phase' }
+              workingDays: { type: integer, minimum: 1 }
+              resourceId: { type: string, format: uuid, nullable: true }
+              resourceName: { type: string, maxLength: 150 }
+
+    VerdictRequest:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean }
+        feedback: { type: string, description: Required when accepted is false }
+
+    CauseRequest:
+      type: object
+      required: [cause, note]
+      properties:
+        cause: { type: string, enum: [IT, ProcessOwner] }
+        note: { type: string }
+
+    QaResultRequest:
+      type: object
+      required: [passed]
+      properties:
+        passed: { type: boolean }
+        note: { type: string, description: Required when passed is false }
+
+    UatConfirmRequest:
+      type: object
+      properties:
+        sessionDate: { type: string, format: date, nullable: true }
+
+    ReasonRequest:
+      type: object
+      required: [reason]
+      properties: { reason: { type: string } }
+
+    NoteRequest:
+      type: object
+      required: [note]
+      properties: { note: { type: string } }
+
+    OptionalNoteRequest:
+      type: object
+      properties: { note: { type: string } }
+
+    ResubmitRequest:
+      type: object
+      required: [prototypeLocation, note]
+      properties:
+        prototypeLocation: { type: string, maxLength: 1000 }
+        note: { type: string }
+
+    BugRequest:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, maxLength: 300 }
+        detail: { type: string }
+        reporterName: { type: string, maxLength: 150 }
+
+    ResourceRequest:
+      type: object
+      required: [name, skill]
+      properties:
+        name: { type: string, maxLength: 150 }
+        skill: { type: string }
+
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        currentStage: { $ref: '#/components/schemas/Stage' }
+        errors: { type: object, additionalProperties: { type: array, items: { type: string } } }
